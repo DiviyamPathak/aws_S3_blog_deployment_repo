@@ -10,7 +10,7 @@ document.addEventListener("DOMContentLoaded", () => {
     postContent.innerHTML = `
       <div style="color: red; text-align: center;">
         ⚠️ Please run this site using a local server.<br>
-        Try <code>python3 -m http.server 8000</code> and visit 
+        Try <code>python3 -m http.server 8000</code> and visit
         <a href="http://localhost:8000" style="color: inherit;">http://localhost:8000</a>
       </div>
     `;
@@ -19,11 +19,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Fetch list of posts from posts.json
   fetch("posts/posts.json")
-    .then(res => res.json())
-    .then(files => {
+    .then((res) => res.json())
+    .then((files) => {
       const ul = document.createElement("ul");
 
-      files.forEach(async file => {
+      files.forEach(async (file) => {
         try {
           const res = await fetch(`posts/${file}`);
           const mdText = await res.text();
@@ -36,7 +36,7 @@ document.addEventListener("DOMContentLoaded", () => {
           a.textContent = title;
           a.dataset.post = file;
 
-          a.addEventListener("click", async e => {
+          a.addEventListener("click", async (e) => {
             e.preventDefault();
             await loadPost(file);
           });
@@ -50,7 +50,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       postListEl.appendChild(ul);
     })
-    .catch(err => {
+    .catch((err) => {
       postListEl.innerHTML = `<p style="color:red;">❌ Failed to load posts.json: ${err}</p>`;
     });
 
@@ -66,6 +66,7 @@ document.addEventListener("DOMContentLoaded", () => {
     postListPage.classList.remove("hidden");
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
+
   async function loadPost(filename) {
     postContent.innerHTML = `<p>Loading <b>${filename}</b>...</p>`;
     try {
@@ -76,7 +77,7 @@ document.addEventListener("DOMContentLoaded", () => {
       marked.setOptions({
         breaks: true,
         headerIds: true,
-        mangle: false
+        mangle: false,
       });
 
       const html = marked.parse(mdText);
