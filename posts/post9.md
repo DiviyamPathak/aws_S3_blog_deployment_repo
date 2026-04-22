@@ -75,6 +75,269 @@ We keep reusable infrastructure in `infra/modules`. Each module owns one respons
 
 The root stack in `infra/main.tf` wires the modules together.
 
+## Terraform Tutorial: Reading This Infrastructure
+
+Terraform is an Infrastructure as Code tool. Instead of creating Lambda functions, DynamoDB tables, API Gateway routes, and EventBridge rules by clicking through the AWS console, we describe the desired infrastructure in `.tf` files.
+
+Terraform then compares three things:
+
+```text
+Terraform code -> Terraform state -> real AWS resources
+```
+
+The code says what we want. The state file records what Terraform currently manages. AWS contains the real resources. When we run `terraform plan`, Terraform compares all three and shows what it wants to create, update, or destroy.
+
+In this project, Terraform is responsible for the infrastructure only. The Lambda application code lives separately, but Terraform packages it and connects it to AWS.
+
+### Step 1: Configure the AWS Provider
+
+Terraform talks to AWS through the AWS provider.
+
+A simplified provider setup looks like this:
+
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+```
+
+The provider does not contain AWS access keys. Locally, Terraform gets credentials from the AWS CLI profile we configured with `aws configure`. In GitHub Actions, Terraform gets temporary credentials through OIDC.
+
+### Step 2: Use Variables for Environment Differences
+
+Variables let the same Terraform code work for both dev and prod.
+
+Example variables:
+
+```hcl
+variable "project_name" {
+  type = string
+}
+
+variable "environment" {
+  type = string
+}
+
+variable "aws_region" {
+  type    = string
+  default = "us-east-1"
+}
+```
+
+Dev can pass:
+
+```hcl
+environment = "dev"
+```
+
+Prod can pass:
+
+```hcl
+environment = "prod"
+```
+
+Then resource names can include both values:
+
+```hcl
+name = "${var.project_name}-${var.environment}-endpoints"
+```
+
+That gives us predictable names such as:
+
+```text
+network-latency-tracker-dev-endpoints
+network-latency-tracker-prod-endpoints
+```
+
+### Step 3: Build Small Modules
+
+A Terraform module is a reusable folder of Terraform code. We use modules so each part of the system has one clear job.
+
+For example, the DynamoDB module owns the tables. The Lambda module owns Lambda functions and IAM permissions. The API Gateway module owns routes and integrations.
+
+A simplified module call looks like this:
+
+```hcl
+module "dynamodb" {
+  source       = "./modules/dynamodb"
+  project_name = var.project_name
+  environment  = var.environment
+}
+```
+
+The root stack calls the modules and passes values into them. The modules return outputs, and the root stack passes those outputs to other modules.
+
+That is how the system gets connected. For example:
+
+```text
+DynamoDB module output -> Lambda environment variable
+Lambda module output   -> API Gateway integration
+Lambda module output   -> EventBridge target
+```
+
+This is one of the most important Terraform ideas: modules should not be isolated islands. They are small building blocks wired together through inputs and outputs.
+
+### Step 4: Create AWS Resources
+
+Inside a module, Terraform resources map to actual AWS resources.
+
+A simplified DynamoDB table resource looks like this:
+
+```hcl
+resource "aws_dynamodb_table" "endpoints" {
+  name         = "${var.project_name}-${var.environment}-endpoints"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "url"
+
+  attribute {
+    name = "url"
+    type = "S"
+  }
+}
+```
+
+The resource type is `aws_dynamodb_table`. The local Terraform name is `endpoints`. Together, Terraform identifies it as:
+
+```text
+aws_dynamodb_table.endpoints
+```
+
+For Lambda, the resource type is usually:
+
+```text
+aws_lambda_function
+```
+
+For API Gateway HTTP API, we use resources such as:
+
+```text
+aws_apigatewayv2_api
+aws_apigatewayv2_route
+aws_apigatewayv2_integration
+```
+
+For the five-minute schedule, we use EventBridge resources such as:
+
+```text
+aws_cloudwatch_event_rule
+aws_cloudwatch_event_target
+```
+
+Terraform uses references between resources to understand order. If API Gateway needs a Lambda function ARN, Terraform knows the Lambda must exist before API Gateway can finish connecting the integration.
+
+### Step 5: Expose Important Values with Outputs
+
+Outputs print useful values after `terraform apply`.
+
+For this project, the most useful output is the API endpoint:
+
+```hcl
+output "api_endpoint" {
+  value = module.api_gateway.api_endpoint
+}
+```
+
+After deployment, we can read it with:
+
+```bash
+terraform -chdir=infra/environments/dev output -raw api_endpoint
+```
+
+That gives us the base URL we use for:
+
+```text
+POST /register
+GET /results
+```
+
+### Step 6: Follow the Terraform Workflow
+
+The normal Terraform workflow for this project is:
+
+```text
+fmt -> init -> validate -> plan -> apply -> test -> destroy
+```
+
+`terraform fmt` cleans up formatting.
+
+`terraform init` downloads the provider and prepares the working directory.
+
+`terraform validate` checks whether the Terraform configuration is valid.
+
+`terraform plan` shows what Terraform wants to change.
+
+`terraform apply` creates or updates AWS resources.
+
+`terraform destroy` removes the resources when we are done testing.
+
+We should treat `plan` as the review step. If the plan says Terraform wants to delete a production DynamoDB table, we stop and understand why before applying.
+
+### Step 7: Make a Small Change Safely
+
+Suppose we want the latency checker to run every ten minutes instead of every five minutes.
+
+The scheduler module may receive a value like:
+
+```hcl
+schedule_expression = "rate(5 minutes)"
+```
+
+We change it to:
+
+```hcl
+schedule_expression = "rate(10 minutes)"
+```
+
+Then we run:
+
+```bash
+terraform -chdir=infra fmt -recursive
+terraform -chdir=infra/environments/dev validate
+terraform -chdir=infra/environments/dev plan
+```
+
+The plan should show an update to the EventBridge schedule, not a full rebuild of the whole project.
+
+If the plan looks correct, we apply:
+
+```bash
+terraform -chdir=infra/environments/dev apply
+```
+
+This is the habit we want: small code change, review the plan, apply only when the plan matches our intention.
+
+### Step 8: Respect Terraform State
+
+Terraform state is important because it maps Terraform resources to real AWS resource IDs.
+
+For example, the code may say:
+
+```text
+aws_lambda_function.ping_endpoints
+```
+
+The state knows the real AWS Lambda function name and ID behind that Terraform resource.
+
+For local learning, Terraform may create local state files. We do not commit those files to GitHub. For team or production usage, we should move state to a remote backend such as S3 with state locking.
+
+In this project, the safe rule is simple:
+
+```text
+Commit Terraform code.
+Do not commit Terraform state.
+```
+
+This keeps the repository safe to publish and prevents environment-specific infrastructure metadata from leaking into source control.
+
 The environment folders, `infra/environments/dev` and `infra/environments/prod`, call the same root stack with different settings. This lets us deploy the same architecture with different names and safety defaults.
 
 ## Dev and Prod Environments
